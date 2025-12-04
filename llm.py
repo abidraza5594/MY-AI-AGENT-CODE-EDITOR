@@ -1,4 +1,5 @@
 """LLM client for Ollama"""
+import sys
 import requests
 from typing import Optional, Dict
 from logger import get_logger
@@ -15,7 +16,7 @@ class LLMClient:
     def generate(self, prompt: str, model: str, 
                 temperature: float = 0.7, max_tokens: int = 4000) -> str:
         """
-        Generate completion from Ollama
+        Generate completion from Ollama with streaming
         
         Args:
             prompt: Input prompt
@@ -31,7 +32,7 @@ class LLMClient:
         payload = {
             "model": model,
             "prompt": prompt,
-            "stream": False,
+            "stream": True,  # Enable streaming
             "options": {
                 "temperature": temperature,
                 "num_predict": max_tokens
@@ -39,16 +40,41 @@ class LLMClient:
         }
         
         try:
+            print("   💭 Thinking...", flush=True)
+            sys.stdout.flush()
+            
             response = requests.post(
                 self.api_url,
                 json=payload,
-                timeout=300
+                timeout=600,
+                stream=True
             )
             response.raise_for_status()
             
-            result = response.json()
-            generated_text = result.get("response", "")
+            generated_text = ""
+            dot_count = 0
             
+            # Stream the response (but don't print JSON)
+            import json as json_lib
+            for line in response.iter_lines():
+                if line:
+                    try:
+                        chunk = line.decode('utf-8')
+                        data = json_lib.loads(chunk)
+                        if 'response' in data:
+                            text_chunk = data['response']
+                            generated_text += text_chunk
+                            
+                            # Show progress dots instead of JSON
+                            dot_count += 1
+                            if dot_count % 20 == 0:
+                                print(".", end="")
+                                sys.stdout.flush()
+                    except:
+                        continue
+            
+            print(" ✅")
+            sys.stdout.flush()
             logger.debug(f"LLM response length: {len(generated_text)} chars")
             return generated_text
             
@@ -81,3 +107,65 @@ class LLMClient:
         except Exception as e:
             logger.error(f"Failed to list models: {e}")
             return []
+    
+    def generate_streaming(self, prompt: str, model: str, 
+                          temperature: float = 0.7, max_tokens: int = 4000,
+                          callback=None) -> str:
+        """
+        Generate with streaming and callback for each chunk
+        
+        Args:
+            prompt: Input prompt
+            model: Model name
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens
+            callback: Function to call with each chunk
+            
+        Returns:
+            Complete generated text
+        """
+        logger.debug(f"Calling LLM with streaming: {model}")
+        
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "stream": True,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens
+            }
+        }
+        
+        try:
+            response = requests.post(
+                self.api_url,
+                json=payload,
+                timeout=600,
+                stream=True
+            )
+            response.raise_for_status()
+            
+            generated_text = ""
+            
+            # Stream the response
+            import json as json_lib
+            for line in response.iter_lines():
+                if line:
+                    try:
+                        chunk = line.decode('utf-8')
+                        data = json_lib.loads(chunk)
+                        if 'response' in data:
+                            text_chunk = data['response']
+                            generated_text += text_chunk
+                            
+                            # Call callback with chunk if provided
+                            if callback:
+                                callback(text_chunk)
+                    except:
+                        continue
+            
+            return generated_text
+            
+        except Exception as e:
+            logger.error(f"LLM streaming failed: {e}")
+            raise

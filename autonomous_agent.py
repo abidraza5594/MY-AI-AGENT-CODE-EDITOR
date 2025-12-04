@@ -11,6 +11,12 @@ import json
 from pathlib import Path
 from datetime import datetime
 
+# Force unbuffered output for real-time display
+os.environ['PYTHONUNBUFFERED'] = '1'
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+
 from config import Config
 from logger import get_logger
 from llm import LLMClient
@@ -24,6 +30,10 @@ class AutonomousAgent:
         self.llm = LLMClient(self.config.OLLAMA_BASE_URL)
         self.tools = Tools()
         self.conversation_history = []
+        self.current_file_buffer = ""
+        self.current_file_path = ""
+        self.in_file_content = False
+        self.step_count = 0
     
     def print_banner(self):
         """Print welcome banner"""
@@ -98,8 +108,7 @@ class AutonomousAgent:
     
     def create_autonomous_plan(self, instruction: str) -> dict:
         """Create fully autonomous execution plan"""
-        print("🧠 Creating autonomous plan...")
-        print("   ⏳ Thinking... (this may take 10-30 seconds)")
+        print("🧠 Creating plan and executing in real-time...", flush=True)
         
         # Build context from history
         context = "\n".join([
@@ -107,45 +116,30 @@ class AutonomousAgent:
             for msg in self.conversation_history[-5:]
         ])
         
-        prompt = f"""You are a fully autonomous AI agent. Analyze this instruction and create a complete execution plan.
+        prompt = f"""Task: {instruction}
 
-Previous context:
-{context}
-
-Current instruction: {instruction}
-
-IMPORTANT: Do NOT use ng commands (ng new, ng generate, ng serve). Instead, create files directly with complete content.
-
-Determine what needs to be done and output ONLY valid JSON:
-
+Output JSON (max 5 files):
 {{
-  "action_type": "create_project" | "edit_files" | "fix_error" | "install_packages" | "search_web",
-  "description": "what you will do",
+  "action_type": "create_project",
   "steps": [
-    {{
-      "type": "create_file" | "edit_file" | "run_command" | "search" | "install",
-      "details": {{
-        "path": "file path if applicable",
-        "content": "file content if creating",
-        "command": "command if running",
-        "package": "package if installing",
-        "query": "query if searching"
-      }}
-    }}
+    {{"type": "create_file", "details": {{"path": "D:\\\\Folder\\\\file.ts", "content": "import..."}}}},
+    {{"type": "create_file", "details": {{"path": "D:\\\\Folder\\\\file.html", "content": "<div>..."}}}}
   ],
-  "location": "where to work (path or 'current')"
+  "location": "D:\\\\Folder"
 }}
 
-Be specific and complete. Include ALL necessary steps.
-"""
+Rules: Brief code, no ng commands, max 5 files.
+JSON:"""
         
         try:
+            print("   💭 Generating plan...", flush=True)
             response = self.llm.generate(
                 prompt=prompt,
                 model=self.config.PLANNER_MODEL,
-                temperature=0.3,
-                max_tokens=6000
+                temperature=0.2,
+                max_tokens=2000
             )
+            print("   ✅ Plan generated!", flush=True)
             
             # Parse JSON
             response = response.strip()
@@ -183,12 +177,16 @@ Be specific and complete. Include ALL necessary steps.
             step_type = step.get('type')
             details = step.get('details', {})
             
-            print(f"\n{'='*60}")
-            print(f"Step {i}/{len(steps)}: {step_type}")
-            print(f"{'='*60}")
+            print(f"\n{'='*60}", flush=True)
+            print(f"Step {i}/{len(steps)}: {step_type}", flush=True)
+            print(f"{'='*60}", flush=True)
             
             try:
-                if step_type == 'create_file':
+                if step_type == 'create_folder':
+                    self.create_folder(details, location)
+                    success_count += 1
+                
+                elif step_type == 'create_file':
                     self.create_file(details, location)
                     success_count += 1
                 
@@ -220,6 +218,19 @@ Be specific and complete. Include ALL necessary steps.
         print(f"  ✅ COMPLETED: {success_count}/{len(steps)} steps successful")
         print(f"{'='*70}\n")
     
+    def create_folder(self, details: dict, base_location: str):
+        """Create a folder"""
+        folder_path = details.get('path', '')
+        
+        if not folder_path:
+            return
+        
+        full_path = Path(folder_path)
+        
+        print(f"   📁 Creating folder: {full_path}", flush=True)
+        full_path.mkdir(parents=True, exist_ok=True)
+        print(f"   ✅ Folder created: {full_path}", flush=True)
+    
     def create_file(self, details: dict, base_location: str):
         """Create a file"""
         file_path = details.get('path', '')
@@ -230,7 +241,7 @@ Be specific and complete. Include ALL necessary steps.
         else:
             full_path = Path(file_path)
         
-        print(f"   📝 Creating: {full_path}")
+        print(f"   📝 Creating file: {full_path}", flush=True)
         
         # Create parent directories
         full_path.parent.mkdir(parents=True, exist_ok=True)
@@ -239,9 +250,10 @@ Be specific and complete. Include ALL necessary steps.
         with open(full_path, 'w', encoding='utf-8') as f:
             f.write(content)
         
-        # Show file size
+        # Show file size and preview
         size = len(content)
-        print(f"   ✅ Created: {full_path} ({size} bytes)")
+        lines = content.count('\n') + 1
+        print(f"   ✅ File created: {size} bytes, {lines} lines", flush=True)
     
     def edit_file(self, details: dict, base_location: str):
         """Edit an existing file"""
@@ -258,8 +270,8 @@ Be specific and complete. Include ALL necessary steps.
             self.create_file(details, base_location)
             return
         
-        print(f"   📝 Editing: {full_path}")
-        print(f"   ⏳ Generating changes... (10-20 seconds)")
+        print(f"   📝 Editing: {full_path}", flush=True)
+        print(f"   ⏳ Generating changes... (10-20 seconds)", flush=True)
         
         # Read current content
         with open(full_path, 'r', encoding='utf-8') as f:
@@ -293,8 +305,8 @@ Output ONLY the complete new file content, no explanations.
         with open(full_path, 'w', encoding='utf-8') as f:
             f.write(new_content)
         
-        print(f"   ✅ Edited: {full_path}")
-        print(f"   💾 Backup: {backup_path}")
+        print(f"   ✅ Edited: {full_path}", flush=True)
+        print(f"   💾 Backup: {backup_path}", flush=True)
     
     def run_command(self, details: dict):
         """Run a shell command"""
@@ -321,7 +333,8 @@ Output ONLY the complete new file content, no explanations.
         if not package:
             return
         
-        print(f"   📦 Installing: {package}")
+        print(f"   📦 Installing package: {package}", flush=True)
+        print(f"   ⏳ This may take a minute...", flush=True)
         
         if ':' in package:
             manager, pkg_name = package.split(':', 1)
@@ -330,15 +343,15 @@ Output ONLY the complete new file content, no explanations.
             elif manager == 'npm':
                 success = self.tools.npm_install(pkg_name)
             else:
-                print(f"   ⚠️  Unknown package manager: {manager}")
+                print(f"   ⚠️  Unknown package manager: {manager}", flush=True)
                 return
         else:
             success = self.tools.pip_install(package)
         
         if success:
-            print(f"   ✅ Installed")
+            print(f"   ✅ Package installed successfully!", flush=True)
         else:
-            print(f"   ❌ Installation failed")
+            print(f"   ❌ Installation failed", flush=True)
     
     def web_search(self, details: dict):
         """Search the web"""
@@ -347,16 +360,17 @@ Output ONLY the complete new file content, no explanations.
         if not query:
             return
         
-        print(f"   🌐 Searching: {query}")
+        print(f"   🌐 Searching web: {query}", flush=True)
+        print(f"   ⏳ Searching...", flush=True)
         
         results = self.tools.websearch_ddg(query, max_results=3)
         
         if results:
-            print(f"   ✅ Found {len(results)} results")
-            for r in results[:2]:
-                print(f"      - {r['title']}")
+            print(f"   ✅ Found {len(results)} results:", flush=True)
+            for i, r in enumerate(results[:2], 1):
+                print(f"      {i}. {r['title']}", flush=True)
         else:
-            print(f"   ⚠️  No results found")
+            print(f"   ⚠️  No results found", flush=True)
     
     def auto_fix_error(self, error: str, original_instruction: str):
         """Automatically fix an error"""
@@ -421,6 +435,50 @@ Analyze the error and provide a fix. Output JSON:
         
         except Exception as e:
             print(f"   ❌ Auto-fix failed: {e}")
+    
+    def on_plan_chunk(self, chunk: str):
+        """Callback for streaming plan generation - creates files in real-time"""
+        import re
+        
+        # Look for file paths and content in the streaming JSON
+        # Pattern: "path": "D:\\AbidTodo\\file.ts"
+        path_match = re.search(r'"path":\s*"([^"]+)"', chunk)
+        if path_match and not self.in_file_content:
+            self.current_file_path = path_match.group(1)
+            self.step_count += 1
+            print(f"\n   📝 [{self.step_count}] Creating: {self.current_file_path}", flush=True)
+            self.in_file_content = True
+            self.current_file_buffer = ""
+        
+        # Pattern: "content": "code here..."
+        if self.in_file_content and '"content"' in chunk:
+            # Start collecting content
+            content_start = chunk.find('"content"')
+            if content_start != -1:
+                # Extract content between quotes
+                content_match = re.search(r'"content":\s*"([^"]*(?:\\.[^"]*)*)"', chunk)
+                if content_match:
+                    content = content_match.group(1)
+                    # Unescape the content
+                    content = content.replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
+                    
+                    # Create file immediately
+                    if self.current_file_path and content:
+                        try:
+                            file_path = Path(self.current_file_path)
+                            file_path.parent.mkdir(parents=True, exist_ok=True)
+                            
+                            with open(file_path, 'w', encoding='utf-8') as f:
+                                f.write(content)
+                            
+                            size = len(content)
+                            lines = content.count('\n') + 1
+                            print(f"   ✅ Created: {size} bytes, {lines} lines", flush=True)
+                            
+                            self.in_file_content = False
+                            self.current_file_path = ""
+                        except Exception as e:
+                            print(f"   ⚠️  Error: {e}", flush=True)
 
 def main():
     """Entry point"""
